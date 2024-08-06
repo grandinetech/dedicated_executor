@@ -34,7 +34,7 @@ use futures::{
     ready, Future, FutureExt, TryFutureExt,
 };
 
-use log::{debug, warn};
+use log::{debug, info, warn};
 
 /// Task that can be added to the executor-internal queue.
 ///
@@ -327,6 +327,9 @@ impl DedicatedExecutor {
             }
         });
         let cancel = CancellationToken::new();
+
+        info!("DedicatedExecutor::spawn state lock");
+
         let mut state = self.state.lock();
         let task = Task {
             fut,
@@ -348,6 +351,8 @@ impl DedicatedExecutor {
             );
         }
 
+        info!("DedicatedExecutor::spawn state unlock");
+
         Job {
             rx,
             cancel,
@@ -357,10 +362,16 @@ impl DedicatedExecutor {
 
     /// Number of currently active tasks.
     pub fn tasks(&self) -> usize {
+        info!("DedicatedExecutor::tasks state lock");
+
         let state = self.state.lock();
 
         // the strong count is always `1 + jobs` because of the Arc we hold within Self
-        Arc::strong_count(&state.task_refs).saturating_sub(1)
+        let count = Arc::strong_count(&state.task_refs).saturating_sub(1);
+
+        info!("DedicatedExecutor::tasks state unlock");
+
+        count
     }
 
     /// signals shutdown of this executor and any Clones
@@ -369,10 +380,14 @@ impl DedicatedExecutor {
             return;
         }
 
+        info!("DedicatedExecutor::shutdown state lock");
+
         // hang up the channel which will cause the dedicated thread
         // to quit
         let mut state = self.state.lock();
         state.requests = None;
+
+        info!("DedicatedExecutor::shutdown state unlock");
     }
 
     /// Stops all subsequent task executions, and waits for the worker
@@ -394,11 +409,15 @@ impl DedicatedExecutor {
 
         self.shutdown();
 
+        info!("DedicatedExecutor::join state lock");
+
         // get handle mutex is held
         let handle = {
             let state = self.state.lock();
             state.completed_shutdown.clone()
         };
+
+        info!("DedicatedExecutor::join state unlock");
 
         // wait for completion while not holding the mutex to avoid
         // deadlocks
