@@ -14,6 +14,7 @@
     clippy::dbg_macro
 )]
 
+use log::info;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use pin_project::{pin_project, pinned_drop};
@@ -25,6 +26,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
+    time::SystemTime,
 };
 use tokio::sync::oneshot::{error::RecvError, Receiver};
 use tokio_util::sync::CancellationToken;
@@ -46,6 +48,8 @@ struct Task {
     #[allow(dead_code)]
     task_ref: Arc<()>,
     metrics: Option<Arc<Metrics>>,
+
+    name: String,
 }
 
 impl Task {
@@ -254,7 +258,16 @@ impl DedicatedExecutor {
                         let handle = join.read_owned().await;
 
                         tokio::task::spawn(async move {
+                            let started_at = std::time::Instant::now();
+                            let task_name = task.name.clone();
+                            info!("dedicated executor starting task {task_name}");
                             task.run().await;
+
+                            info!(
+                                "dedicated executor finished task {task_name} in {} ms",
+                                started_at.elapsed().as_millis(),
+                            );
+
                             std::mem::drop(handle);
                         });
                     }
@@ -304,7 +317,7 @@ impl DedicatedExecutor {
     ///
     /// Currently all tasks are added to the tokio executor
     /// immediately and compete for the threadpool's resources.
-    pub fn spawn<T>(&self, task: T) -> Job<T::Output>
+    pub fn spawn<T>(&self, task_name: &str, task: T) -> Job<T::Output>
     where
         T: Future + Send + 'static,
         T::Output: Send + 'static,
@@ -328,11 +341,16 @@ impl DedicatedExecutor {
         });
         let cancel = CancellationToken::new();
         let mut state = self.state.lock();
+        let timestamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("now should be later than UNIX_EPOCH")
+            .as_nanos();
         let task = Task {
             fut,
             cancel: cancel.clone(),
             task_ref: Arc::clone(&state.task_refs),
             metrics: self.metrics.clone(),
+            name: format!("{task_name} {timestamp}"),
         };
 
         if let Some(requests) = &mut state.requests {
