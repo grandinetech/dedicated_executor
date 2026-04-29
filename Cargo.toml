@@ -9,8 +9,7 @@ log = "0.4.17"
 once_cell = { version = "1.17", features = ["parking_lot"] }
 parking_lot = "0.12"
 pin-project = "1.0"
-prometheus_metrics = { workspace = true }
-tokio = { version = "1.25" }
+tokio = { version = "1.25", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7.4" }
 
 # use libc on unix like platforms to set worker priority in DedicatedExecutor

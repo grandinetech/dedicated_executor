@@ -17,7 +17,6 @@
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use pin_project::{pin_project, pinned_drop};
-use prometheus_metrics::Metrics;
 use std::{
     panic::AssertUnwindSafe,
     pin::Pin,
@@ -45,7 +44,6 @@ struct Task {
 
     #[allow(dead_code)]
     task_ref: Arc<()>,
-    metrics: Option<Arc<Metrics>>,
 }
 
 impl Task {
@@ -53,10 +51,6 @@ impl Task {
     ///
     /// This runs the payload or cancels if the linked [`Job`] is dropped.
     async fn run(self) {
-        let _timer = self
-            .metrics
-            .map(|metrics| metrics.dedicated_executor_task_times.start_timer());
-
         tokio::select! {
             _ = self.cancel.cancelled() => (),
             _ = self.fut => (),
@@ -128,9 +122,6 @@ pub struct DedicatedExecutor {
     ///
     /// This will ignore explicit shutdown requests.
     testing: bool,
-
-    /// Optional prometheus_metrics::Metrics
-    metrics: Option<Arc<Metrics>>,
 }
 
 /// Runs futures (and any `tasks` that are `tokio::task::spawned` by
@@ -183,7 +174,7 @@ impl std::fmt::Debug for DedicatedExecutor {
 
 /// [`DedicatedExecutor`] for testing purposes.
 static TESTING_EXECUTOR: Lazy<DedicatedExecutor> =
-    Lazy::new(|| DedicatedExecutor::new_inner("testing", 1, true, None, None));
+    Lazy::new(|| DedicatedExecutor::new_inner("testing", 1, true, None));
 
 impl DedicatedExecutor {
     /// Creates a new `DedicatedExecutor` with a dedicated tokio
@@ -206,9 +197,8 @@ impl DedicatedExecutor {
         thread_name: &str,
         num_threads: usize,
         worker_priority: Option<i32>,
-        metrics: Option<Arc<Metrics>>,
     ) -> Self {
-        Self::new_inner(thread_name, num_threads, false, worker_priority, metrics)
+        Self::new_inner(thread_name, num_threads, false, worker_priority)
     }
 
     fn new_inner(
@@ -216,7 +206,6 @@ impl DedicatedExecutor {
         num_threads: usize,
         testing: bool,
         worker_priority: Option<i32>,
-        metrics: Option<Arc<Metrics>>,
     ) -> Self {
         let thread_name = thread_name.to_string();
         let thread_counter = Arc::new(AtomicUsize::new(1));
@@ -275,15 +264,10 @@ impl DedicatedExecutor {
             thread: Some(thread),
         };
 
-        if let Some(metrics) = metrics.as_ref() {
-            metrics.set_dedicated_exutor_thread_count(num_threads);
-        }
-
         Self {
             state: Arc::new(Mutex::new(state)),
             num_threads,
             testing,
-            metrics,
         }
     }
 
@@ -332,7 +316,6 @@ impl DedicatedExecutor {
             fut,
             cancel: cancel.clone(),
             task_ref: Arc::clone(&state.task_refs),
-            metrics: self.metrics.clone(),
         };
 
         if let Some(requests) = &mut state.requests {
@@ -340,12 +323,6 @@ impl DedicatedExecutor {
             requests.send(task).ok();
         } else {
             warn!("tried to schedule task on an executor that was shutdown");
-        }
-
-        if let Some(metrics) = self.metrics.as_ref() {
-            metrics.set_dedicated_exutor_task_count(
-                Arc::strong_count(&state.task_refs).saturating_sub(1),
-            );
         }
 
         Job {
@@ -444,7 +421,7 @@ mod tests {
     async fn basic() {
         let barrier = Arc::new(Barrier::new(2));
 
-        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None, None);
+        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None);
         let dedicated_task = exec.spawn(do_work(42, Arc::clone(&barrier)));
 
         // Note the dedicated task will never complete if it runs on
@@ -462,7 +439,7 @@ mod tests {
     #[tokio::test]
     async fn basic_clone() {
         let barrier = Arc::new(Barrier::new(2));
-        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None, None);
+        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None);
         // Run task on clone should work fine
         let dedicated_task = exec.clone().spawn(do_work(42, Arc::clone(&barrier)));
         barrier.wait();
@@ -474,7 +451,7 @@ mod tests {
     #[tokio::test]
     async fn drop_clone() {
         let barrier = Arc::new(Barrier::new(2));
-        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None, None);
+        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None);
 
         drop(exec.clone());
 
@@ -496,7 +473,7 @@ mod tests {
             }
         }
 
-        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None, None);
+        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None);
         let _s = S(exec);
 
         // this must not lead to a double-panic and SIGILL
@@ -508,7 +485,7 @@ mod tests {
         let barrier = Arc::new(Barrier::new(3));
 
         // make an executor with two threads
-        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 2, None, None);
+        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 2, None);
         let dedicated_task1 = exec.spawn(do_work(11, Arc::clone(&barrier)));
         let dedicated_task2 = exec.spawn(do_work(42, Arc::clone(&barrier)));
 
@@ -524,7 +501,7 @@ mod tests {
 
     #[tokio::test]
     async fn worker_priority() {
-        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 2, None, None);
+        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 2, None);
 
         let dedicated_task = exec.spawn(async move { get_current_thread_priority() });
 
@@ -535,7 +512,7 @@ mod tests {
 
     #[tokio::test]
     async fn tokio_spawn() {
-        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 2, None, None);
+        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 2, None);
 
         // spawn a task that spawns to other tasks and ensure they run on the dedicated
         // executor
@@ -564,7 +541,7 @@ mod tests {
 
     #[tokio::test]
     async fn panic_on_executor_str() {
-        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None, None);
+        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None);
         let dedicated_task = exec.spawn(async move {
             if true {
                 panic!("At the disco, on the dedicated task scheduler");
@@ -585,7 +562,7 @@ mod tests {
 
     #[tokio::test]
     async fn panic_on_executor_string() {
-        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None, None);
+        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None);
         let dedicated_task = exec.spawn(async move {
             if true {
                 panic!("{} {}", 1, 2);
@@ -603,7 +580,7 @@ mod tests {
 
     #[tokio::test]
     async fn panic_on_executor_other() {
-        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None, None);
+        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None);
         let dedicated_task = exec.spawn(async move {
             if true {
                 panic_any(1)
@@ -624,7 +601,7 @@ mod tests {
         let barrier = Arc::new(Barrier::new(2));
         let captured = Arc::clone(&barrier);
 
-        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None, None);
+        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None);
         let dedicated_task = exec.spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
             do_work(42, captured).await
@@ -642,7 +619,7 @@ mod tests {
 
     #[tokio::test]
     async fn executor_submit_task_after_shutdown() {
-        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None, None);
+        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None);
 
         // Simulate trying to submit tasks once executor has shutdown
         exec.shutdown();
@@ -660,7 +637,7 @@ mod tests {
 
     #[tokio::test]
     async fn executor_submit_task_after_clone_shutdown() {
-        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None, None);
+        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None);
 
         // shutdown the clone (but not the exec)
         exec.clone().join().await;
@@ -680,14 +657,14 @@ mod tests {
 
     #[tokio::test]
     async fn executor_join() {
-        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None, None);
+        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None);
         // test it doesn't hang
         exec.join().await;
     }
 
     #[tokio::test]
     async fn executor_join2() {
-        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None, None);
+        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None);
         // test it doesn't hang
         exec.join().await;
         exec.join().await;
@@ -696,7 +673,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::redundant_clone)]
     async fn executor_clone_join() {
-        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None, None);
+        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None);
         // test it doesn't hang
         exec.clone().join().await;
         exec.clone().join().await;
@@ -706,7 +683,7 @@ mod tests {
     #[tokio::test]
     async fn drop_receiver() {
         // create empty executor
-        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None, None);
+        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None);
         assert_eq!(exec.tasks(), 0);
 
         // create first blocked task
@@ -737,7 +714,7 @@ mod tests {
     #[tokio::test]
     async fn detach_receiver() {
         // create empty executor
-        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None, None);
+        let exec = DedicatedExecutor::new("Test DedicatedExecutor", 1, None);
         assert_eq!(exec.tasks(), 0);
 
         // create first task
